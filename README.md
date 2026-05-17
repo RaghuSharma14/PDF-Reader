@@ -41,16 +41,15 @@ An AI-powered document intelligence application that enables users to upload PDF
 
 ---
 
-## Project Structure
+## 📁 Project Structure
 
 ```
 PDF-Reader/
 ├── app.py              # Streamlit frontend + QA logic
 ├── rag_engine.py       # RAG pipeline (vector store + retrieval chain)
 ├── requirements.txt    # Dependencies
+└── uploaded_pdfs/      # Temporary PDF storage
 ```
-
----
 
 ## Setup & Installation
 
