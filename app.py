@@ -1,142 +1,71 @@
 import streamlit as st
-from transformers import pipeline
-import PyPDF2
+import tempfile
+import os
 import re
-import torch  # Ensure torch is imported
+import PyPDF2
 
-# Title of the app
+from rag_engine import load_and_chunk_pdf, build_vector_store, answer_question
+
 st.title("Smart PDF Question Answering App")
 
-# File uploader for PDF
-uploaded_file = st.file_uploader("Upload Resume (PDF)", type="pdf")
+uploaded_file = st.file_uploader("Upload a PDF", type="pdf")
 
 if uploaded_file is not None:
-    # Extract text from the PDF
-    pdf_reader = PyPDF2.PdfReader(uploaded_file)
-    text = ""
-    for page in pdf_reader.pages:
-        text += page.extract_text() + "\n"
+    # Only rebuild the index when a NEW file is uploaded. The old version rebuilt the FAISS vector store from scratch on every single question, which is slow and unnecessary.
+    if st.session_state.get("uploaded_filename") != uploaded_file.name:
+        with st.spinner("Reading and indexing document..."):
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+                tmp.write(uploaded_file.getvalue())
+                tmp_path = tmp.name
 
-    st.subheader("Extracted Resume Content:")
-    st.text_area("Text from PDF", value=text, height=300)
+            chunks = load_and_chunk_pdf(tmp_path)
+            st.session_state["vector_store"] = build_vector_store(chunks)
+            os.unlink(tmp_path)
 
-    # Set device to CPU explicitly (this avoids issues with CUDA/meta tensor)
-    device = -1  # Use CPU for inference
-    qa_pipeline = pipeline("question-answering", model="deepset/roberta-base-squad2", device=device)
+            uploaded_file.seek(0)
+            pdf_reader = PyPDF2.PdfReader(uploaded_file)
+            text = ""
+            for page in pdf_reader.pages:
+                text += page.extract_text() + "\n"
 
-    # Function to handle special queries like 'Skills', 'Objective', etc.
+            st.session_state["raw_text"] = text
+            st.session_state["uploaded_filename"] = uploaded_file.name
+
+    st.subheader("Extracted Document Content:")
+    st.text_area("Text from PDF", value=st.session_state["raw_text"], height=300)
+
+    SECTION_HEADERS = [
+        "SUMMARY", "EDUCATION", "SKILLS", "PROJECTS",
+        "ACHIEVEMENTS", "OBJECTIVE", "EXPERIENCE",
+    ]
+
     def handle_special_queries(question, context):
-        # Check for "skills" query
-        if "skills" in question.lower():
-            skills_section = re.search(r'SKILLS\s*([^A-Z]+)', context, re.DOTALL)
-            if skills_section:
-                return skills_section.group(1).strip()
-            else:
-                return "Sorry, I couldn't find the Skills section in the resume."
-        
-        # Check for "objective" query
-        elif "objective" in question.lower():
-            objective_section = re.search(r'OBJECTIVE\s*([^A-Z]+)', context, re.DOTALL)
-            if objective_section:
-                return objective_section.group(1).strip()
-            else:
-                return "Sorry, I couldn't find the Objective section in the resume."
-        
-        # Check for "projects" query
-        elif "projects" in question.lower():
-            projects_section = re.search(r'PROJECTS\s*([^A-Z]+)', context, re.DOTALL)
-            if projects_section:
-                return projects_section.group(1).strip()
-            else:
-                return "Sorry, I couldn't find the Projects section in the resume."
-        
-        # Check for "education" query
-        elif "education" in question.lower():
-            education_section = re.search(r'EDUCATION\s*([^A-Z]+)', context, re.DOTALL)
-            if education_section:
-                return education_section.group(1).strip()
-            else:
-                return "Sorry, I couldn't find the Education section in the resume."
-        
-        return None  # If no special query matched, return None
+        """Fast-path common structured queries without invoking the model."""
+        question_lower = question.lower()
+        for header in SECTION_HEADERS:
+            if header.lower() in question_lower:
+                other_headers = "|".join(h for h in SECTION_HEADERS if h != header)
+                pattern = rf"{header}\s*\n(.*?)(?=\n(?:{other_headers})\b|\Z)"
+                match = re.search(pattern, context, re.DOTALL)
+                if match and match.group(1).strip():
+                    return match.group(1).strip()
+                return f"Sorry, I couldn't find the {header.capitalize()} section in the document."
+        return None
 
-    # User input for question
-    st.subheader("Ask a Question About the Resume:")
+    st.subheader("Ask a Question About the Document:")
     question = st.text_input("Enter your question:")
 
     if st.button("Get Answer"):
-        if question:
-            # First, handle special queries (e.g., skills, objective, projects)
-            special_answer = handle_special_queries(question, text)
+        if not question:
+            st.warning("Please enter a question.")
+        else:
+            special_answer = handle_special_queries(question, st.session_state["raw_text"])
             if special_answer:
                 st.success(f"Answer: {special_answer}")
             else:
-                try:
-                    result = qa_pipeline({"question": question, "context": text})
-                    if 'answer' in result and result['answer']:
-                        st.success(f"Answer: {result['answer']}")
-                    else:
-                        st.warning("Sorry, I couldn't find any relevant information.")
-                except Exception as e:
-                    st.error(f"Error: {str(e)}")
-        else:
-            st.warning("Please enter a question.")
-
-
-
-
-
-
-
-
-
-
-
-
-# # app.py
-# import streamlit as st
-# from PyPDF2 import PdfReader
-# from transformers import pipeline
-
-# # Load QA pipeline
-# qa_pipeline = pipeline("question-answering")
-
-# # Streamlit app title
-# st.title("Smart Resume Question Answering")
-
-# # PDF file uploader
-# uploaded_file = st.file_uploader("Upload Resume (PDF)", type="pdf")
-
-# context = ""
-# if uploaded_file is not None:
-#     # Read PDF content
-#     pdf_reader = PdfReader(uploaded_file)
-#     context = ""
-#     for page in pdf_reader.pages:
-#         context += page.extract_text()
-
-#     st.subheader("Extracted Resume Content:")
-#     st.text_area("Text from PDF", value=context, height=300)
-
-# # Question input
-# question = st.text_input("Ask a question about the resume:")
-
-# # QA button
-# if st.button("Get Answer"):
-#     if not context.strip():
-#         st.warning("Please upload a resume first.")
-#     elif not question.strip():
-#         st.warning("Please enter a question.")
-#     else:
-#         try:
-#             result = qa_pipeline({
-#                 "question": question,
-#                 "context": context
-#             })
-#             st.success(f"Answer: {result['answer']}")
-#         except Exception as e:
-#             st.error(f"Error: {e}")
-
-
-
-
+                with st.spinner("Searching document and generating answer..."):
+                    try:
+                        answer = answer_question(st.session_state["vector_store"], question)
+                        st.success(f"Answer: {answer}")
+                    except Exception as e:
+                        st.error(f"Error: {str(e)}")
